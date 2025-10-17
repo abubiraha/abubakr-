@@ -1,0 +1,120 @@
+/ ======================================================
+// 1️⃣ DEFINE ROI
+// ======================================================
+Map.centerObject(roi, 9);
+
+// ======================================================
+// 2️⃣ LOAD SENTINEL-2 SR IMAGE COLLECTION
+// ======================================================
+var s2 = ee.ImageCollection('COPERNICUS/S2_HARMONIZED')
+  .filterBounds(roi)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
+
+// Define comparison years
+var year1 = 2015;
+var year2 = 2025;
+
+// ======================================================
+// 3️⃣ NDVI PER YEAR FUNCTION
+// ======================================================
+function getNDVI(year) {
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end   = ee.Date.fromYMD(year, 12, 31);
+  var img = s2.filterDate(start, end).median().clip(roi);
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return ndvi.set('year', year);
+}
+
+var ndvi1 = getNDVI(year1);
+var ndvi2 = getNDVI(year2);
+
+// ======================================================
+// 4️⃣ ΔNDVI (CHANGE) & CLIP TO ROI
+// ======================================================
+var dNDVI = ndvi2.subtract(ndvi1).rename('dNDVI').clip(roi);
+
+// ======================================================
+// 5️⃣ Z-NDVI (STANDARDIZED CHANGE)
+// ======================================================
+var stats = dNDVI.reduceRegion({
+  reducer: ee.Reducer.mean().combine({
+    reducer2: ee.Reducer.stdDev(),
+    sharedInputs: true
+  }),
+  geometry: roi,
+  scale: 10,
+  maxPixels: 1e13
+});
+
+var mean_dNDVI = ee.Number(stats.get('dNDVI_mean'));
+var std_dNDVI  = ee.Number(stats.get('dNDVI_stdDev'));
+var zNDVI = dNDVI.subtract(mean_dNDVI).divide(std_dNDVI).rename('Z_NDVI').clip(roi);
+
+// ======================================================
+// 6️⃣ CLASSIFY Z-NDVI INTO 5 CLASSES (WITHIN ROI)
+// ======================================================
+var classes = zNDVI.expression(
+  "(z < -2) ? 1" +              // Strong Decrease
+  ": (z >= -2 && z < -1) ? 2" + // Moderate Decrease
+  ": (z >= -1 && z <= 1) ? 3" + // Stable
+  ": (z > 1 && z <= 2) ? 4" +   // Moderate Increase
+  ": (z > 2) ? 5" +             // Strong Increase
+  ": 0", { z: zNDVI }
+).rename('Change_Class').clip(roi);
+
+// ======================================================
+// 7️⃣ VISUALIZATION SETTINGS
+// ======================================================
+var ndviVis = {min: 0, max: 1, palette: ['brown', 'yellow', 'green']};
+var dndviVis = {min: -0.5, max: 0.5, palette: ['red', 'white', 'green']};
+var zndviVis = {min: -3, max: 3, palette: ['purple', 'white', 'darkgreen']};
+var classPalette = [
+  '#B22222', // 1 - Strong Decrease
+  '#FF4500', // 2 - Moderate Decrease
+  '#FFFFFF', // 3 - Stable
+  '#7FFF00', // 4 - Moderate Increase
+  '#006400'  // 5 - Strong Increase
+];
+
+// ======================================================
+// 8️⃣ DISPLAY MAPS (ONLY ROI)
+// ======================================================
+Map.addLayer(ndvi1.clip(roi), ndviVis, 'NDVI ' + year1);
+Map.addLayer(ndvi2.clip(roi), ndviVis, 'NDVI ' + year2);
+Map.addLayer(dNDVI, dndviVis, 'ΔNDVI (' + year2 + '-' + year1 + ')');
+Map.addLayer(zNDVI, zndviVis, 'Z-NDVI');
+Map.addLayer(classes, {min:1, max:5, palette:classPalette}, 'Change Classes');
+
+// ======================================================
+// 9️⃣ LEGEND
+// ======================================================
+var legend = ui.Panel({style:{position:'bottom-left', padding:'8px'}});
+legend.add(ui.Label('🌿 Vegetation Change Classes (ROI only)', {fontWeight:'bold', fontSize:'14px'}));
+var names = [
+  '1️⃣ Strong Decrease',
+  '2️⃣ Moderate Decrease',
+  '3️⃣ Stable',
+  '4️⃣ Moderate Increase',
+  '5️⃣ Strong Increase'
+];
+for (var i=0; i<classPalette.length; i++) {
+  legend.add(
+    ui.Panel([
+      ui.Label('', {backgroundColor: classPalette[i], padding:'8px', margin:'0 6px 0 0'}),
+      ui.Label(names[i])
+    ], ui.Panel.Layout.Flow('horizontal'))
+  );
+}
+Map.add(legend);
+
+// ======================================================
+// 🔟 EXPORT RESULTS (ROI ONLY)
+// ======================================================
+Export.image.toDrive({
+  image: ndvi1.addBands(ndvi2).addBands(dNDVI).addBands(zNDVI).addBands(classes),
+  description: 'ROI_NDVI_dNDVI_ZNDVI_ChangeClasses_' + year1 + '_' + year2,
+  folder: 'GEE_Exports',
+  region: roi,
+  scale: 10,
+  maxPixels: 1e13
+});
